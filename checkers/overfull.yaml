@@ -1,0 +1,93 @@
+description: A Lean kernel checker in plain TeX. Some inputs overfill it.
+url: https://github.com/kim-em/overfull
+ref: main
+rev: 55d3db9bc1d512c487adc0f759336dfc32df1414
+build: command -v tex
+declines:
+  # Known resource limits; increasing the time budget alone may not suffice.
+  - cedar
+  - con-leche
+  - cslib
+  - init
+  - mathlib
+  - std
+  - init-prelude
+  - perf/app-lam
+  - perf/beta-ladder
+  - perf/church-numerals
+  - perf/fueled-chain
+  - perf/grind-ring-5
+  - perf/let-ladder
+  - perf/magma-list-deep-n21
+  - perf/magma-list-deep-n36
+  - perf/magma-list-pair-n21
+  - perf/magma-list-pair-n7
+  - perf/magma-string-n4
+  - perf/magma-string-pair-n9
+  # Declined because we know it will take longer than 60s.
+  # Wall times measured locally with this release and Arena's TeX Live.
+  # To retry, remove the decline and raise the limit below; suggested limits
+  # include 20% headroom, rounded up to 30s. CI hardware may need more.
+  - corner-cases/alg-conv-trans-acc # completed in 84.73s; try 120s
+  - corner-cases/alg-conv-trans-acc-left # completed in 133.42s; try 180s
+  - corner-cases/alg-conv-trans-acc-right # completed in 163.60s; try 210s
+  - corner-cases/subject-reduction-redex # completed in 109.44s; try 150s
+  - corner-cases/subject-reduction-reduct # completed in 76.00s; try 120s
+  - nested-unused-param # completed in 61.93s; try 90s
+  - perf/args-before-unfold # completed in 220.08s; try 270s
+  - perf/discarded-argument # completed in 270.24s; try 330s
+  - perf/discarded-argument-match # completed in 1818.63s; try 2190s
+  - perf/folded-constant-first # completed in 649.95s; try 780s
+  - perf/folded-constant-last # completed in 644.19s; try 780s
+  - perf/refute-cheap-last # completed in 286.53s; try 360s
+  - perf/shared-subterm # completed in 2035.08s; try 2460s
+  - perf/shift-cascade # completed in 369.25s; try 450s
+  - proj-of-stuck-prop # completed in 446.34s; try 540s
+  - proj-of-subst-prop # completed in 508.64s; try 630s
+  - rec-missing-ih # completed in 408.53s; try 510s
+  - rec-of-subst-prop # completed in 487.69s; try 600s
+  - tutorial/082_RBTree.id_spec # completed in 60.47s; try 90s
+run: |
+  python3 - <<'PY'
+  import os, re, subprocess, sys, tempfile, time
+  from pathlib import Path
+
+  deadline = time.monotonic() + 60
+  try:
+      with tempfile.TemporaryDirectory(prefix="overfull-") as directory:
+          work = Path(directory)
+          (work / "kernel.tex").write_bytes(Path("kernel.tex").read_bytes())
+          with open(os.environ["IN"], "rb") as source, (work / "input.bytes").open("wb") as encoded:
+              while chunk := source.read(65536):
+                  if time.monotonic() >= deadline:
+                      raise subprocess.TimeoutExpired("input conversion", 60)
+                  encoded.write(("\n".join(map(str, chunk)) + "\n").encode("ascii"))
+              encoded.write(b"0\n")
+          with (work / "input.bytes").open("rb") as encoded, (work / "tex.log").open("wb") as log:
+              result = subprocess.run(
+                  ["tex", "-halt-on-error", "-no-shell-escape",
+                   "-cnf-line=extra_mem_top=200000000", "-cnf-line=extra_mem_bot=10000000",
+                   "-cnf-line=max_strings=4000000", "-cnf-line=pool_size=64000000",
+                   "-cnf-line=hash_extra=4000000", "kernel.tex"],
+                  stdin=encoded, stdout=log, stderr=subprocess.STDOUT, cwd=work,
+                  timeout=max(0, deadline - time.monotonic()))
+          if result.returncode:
+              with (work / "tex.log").open("rb") as log:
+                  log.seek(max(0, log.seek(0, 2) - 4096))
+                  sys.stderr.buffer.write(log.read())
+              sys.exit(3)
+          raw = (work / "kernel.out").read_bytes()
+          if len(raw) > 4096 or not re.fullmatch(rb"(?:[0-9]+\s+)+", raw):
+              raise ValueError("invalid output encoding")
+          verdict = bytes(int(value) for value in raw.split())
+          if not re.fullmatch(rb"(?:ACCEPT|(?:REJECT|DECLINE) [!-~]+)\n", verdict):
+              raise ValueError("missing or malformed verdict")
+          sys.stdout.buffer.write(verdict)
+          sys.exit({b"ACCEPT": 0, b"REJECT": 1, b"DECLINE": 2}[verdict.split()[0]])
+  except subprocess.TimeoutExpired:
+      print("DECLINE time-limit")
+      sys.exit(2)
+  except (OSError, ValueError, KeyError) as error:
+      print(f"Overfull runner error: {error}", file=sys.stderr)
+      sys.exit(3)
+  PY
